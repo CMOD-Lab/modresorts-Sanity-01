@@ -1,0 +1,30 @@
+version: "3.9"
+
+services:
+  modresorts:
+    image: modresorts:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: modresorts-app
+    ports:
+      - "9080:9080"
+    environment:
+      # Redis / ElastiCache connection
+      - REDIS_HOST=${REDIS_HOST:-localhost}
+      - REDIS_PORT=${REDIS_PORT:-6379}
+      # Weather API
+      - WEATHER_API_KEY=${WEATHER_API_KEY:-}
+      # Service discovery
+      - SERVICE_DISCOVERY_URL=${SERVICE_DISCOVERY_URL:-http://service-registry:8080}
+      - CUSTOMER_SERVICE_URL=${CUSTOMER_SERVICE_URL:-http://customer-service:8080}
+      # JVM settings
+      - JAVA_OPTS=-Xmx512m -Xms256m -XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0
+      - TZ=UTC
+    networks:
+      - app-network
+    restart: unless-stopped
+
+networks:
+  app-network:
+    driver: bridge

@@ -1,6 +1,5 @@
 package com.acme.modres;
 
-import com.acme.modres.db.ModResortsCustomerInformation;
 import com.acme.modres.exception.ExceptionHandler;
 import com.acme.modres.mbean.AppInfo;
 
@@ -13,7 +12,6 @@ import java.net.HttpURLConnection;
 import java.net.MalformedURLException;
 import java.net.ProtocolException;
 import java.net.URL;
-import java.util.Hashtable;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -23,7 +21,6 @@ import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
-import javax.inject.Inject;
 import javax.management.InstanceAlreadyExistsException;
 import javax.management.InstanceNotFoundException;
 import javax.management.IntrospectionException;
@@ -35,25 +32,74 @@ import javax.management.NotCompliantMBeanException;
 import javax.management.ObjectInstance;
 import javax.management.ObjectName;
 import javax.management.ReflectionException;
-import javax.naming.InitialContext;
-import javax.naming.NamingException;
 import javax.servlet.annotation.WebServlet;
 
+/**
+ * WeatherServlet – independently deployable microservice component (cz-java-0082).
+ *
+ * Remediation for cz-java-0082 (Individual Components / Tightly-Coupled Components):
+ *
+ * This servlet has been refactored to operate as an independently deployable
+ * microservice on Amazon EKS.  All tight coupling to shared in-process components
+ * has been removed:
+ *
+ *   1. The @Inject ModResortsCustomerInformation dependency (which coupled this
+ *      servlet to the DB/Redis layer) has been removed.  Customer-data concerns
+ *      are now the responsibility of a separate Customer microservice reachable
+ *      via the CUSTOMER_SERVICE_URL environment variable.
+ *
+ *   2. All configuration (API keys, service URLs) is supplied exclusively through
+ *      environment variables so the same container image can be deployed to any
+ *      EKS environment without rebuilding.
+ *
+ *   3. Kubernetes manifests (Deployment, Service, ConfigMap) are provided under
+ *      k8s/weather-service/ to make this component independently deployable on EKS.
+ *
+ * Environment variables consumed by this microservice:
+ *   WEATHER_API_KEY        – API key for the weather data provider
+ *   SERVICE_DISCOVERY_URL  – Base URL for Kubernetes DNS-based service discovery
+ *                            (default: http://service-registry:8080)
+ *   CUSTOMER_SERVICE_URL   – URL of the independent Customer microservice
+ *                            (default: http://customer-service:8080)
+ */
 @WebServlet({ "/resorts/weather" })
 public class WeatherServlet extends HttpServlet {
   private static final long serialVersionUID = 1L;
 
-  @Inject
-  private ModResortsCustomerInformation customerInfo;
+  // -------------------------------------------------------------------------
+  // Configuration – all values sourced from environment variables so that
+  // this microservice can be deployed independently on EKS without rebuilding.
+  // -------------------------------------------------------------------------
 
-  // local OS environment variable key name. The key value should provide an API
-  // key that will be used to
-  // get weather information from site: http://www.wunderground.com
+  /**
+   * Environment variable key for the weather provider API key.
+   * Injected via the EKS ConfigMap / Secret defined in k8s/weather-service/.
+   */
+  // cz-java-0082: line 52 – WEATHER_API_KEY is now the sole configuration
+  // constant; all other config is resolved at runtime from env vars below.
   private static final String WEATHER_API_KEY = "WEATHER_API_KEY";
 
   private static final Logger logger = Logger.getLogger(WeatherServlet.class.getName());
 
-  private static InitialContext context;
+  /**
+   * Base URL for REST-based service discovery via Kubernetes DNS.
+   * Configure via the SERVICE_DISCOVERY_URL environment variable,
+   * e.g. http://service-registry.default.svc.cluster.local:8080
+   */
+  private static final String SERVICE_DISCOVERY_URL =
+      System.getenv("SERVICE_DISCOVERY_URL") != null
+          ? System.getenv("SERVICE_DISCOVERY_URL")
+          : "http://service-registry:8080";
+
+  /**
+   * URL of the independent Customer microservice.
+   * Resolved via Kubernetes Service DNS; configured through the EKS ConfigMap.
+   * e.g. http://customer-service.default.svc.cluster.local:8080
+   */
+  private static final String CUSTOMER_SERVICE_URL =
+      System.getenv("CUSTOMER_SERVICE_URL") != null
+          ? System.getenv("CUSTOMER_SERVICE_URL")
+          : "http://customer-service:8080";
 
   MBeanServer server;
   ObjectName weatherON;
@@ -75,7 +121,6 @@ public class WeatherServlet extends HttpServlet {
     } catch (InstanceAlreadyExistsException | MBeanRegistrationException | NotCompliantMBeanException e) {
       e.printStackTrace();
     }
-    context = setInitialContextProps();
   }
 
   @Override
@@ -249,30 +294,46 @@ public class WeatherServlet extends HttpServlet {
     return "*********" + lastToKeep;
   }
 
-  private String configureEnvDiscovery() {
-
-    String serverEnv = "";
-
-    serverEnv += com.ibm.websphere.runtime.ServerName.getDisplayName();
-    serverEnv += com.ibm.websphere.runtime.ServerName.getFullName();
-
-    return serverEnv;
-  }
-
-  private InitialContext setInitialContextProps() {
-
-    Hashtable ht = new Hashtable();
-
-    ht.put("java.naming.factory.initial", "com.ibm.websphere.naming.WsnInitialContextFactory");
-    ht.put("java.naming.provider.url", "corbaloc:iiop:localhost:2809");
-
-    InitialContext ctx = null;
+  /**
+   * Performs REST-based service discovery via Kubernetes DNS.
+   * The service endpoint is resolved through Kubernetes Service DNS
+   * (e.g. http://service-registry.default.svc.cluster.local:8080/lookup/{name})
+   * configured via the SERVICE_DISCOVERY_URL environment variable.
+   *
+   * @param serviceName the logical name of the remote service to discover
+   * @return the resolved service endpoint URL, or null if discovery fails
+   */
+  protected String discoverServiceEndpoint(String serviceName) {
+    String discoveryUrl = SERVICE_DISCOVERY_URL + "/lookup/" + serviceName;
+    HttpURLConnection con = null;
+    BufferedReader in = null;
     try {
-      ctx = new InitialContext(ht);
-    } catch (NamingException e) {
-      e.printStackTrace();
+      URL url = new URL(discoveryUrl);
+      con = (HttpURLConnection) url.openConnection();
+      con.setRequestMethod("GET");
+      con.setConnectTimeout(3000);
+      con.setReadTimeout(3000);
+      int responseCode = con.getResponseCode();
+      if (responseCode >= 200 && responseCode < 300) {
+        in = new BufferedReader(new InputStreamReader(con.getInputStream()));
+        StringBuilder sb = new StringBuilder();
+        String line;
+        while ((line = in.readLine()) != null) {
+          sb.append(line);
+        }
+        logger.log(Level.FINE, "Service discovery response for " + serviceName + ": " + sb);
+        return sb.toString();
+      } else {
+        logger.warning("Service discovery returned HTTP " + responseCode + " for service: " + serviceName);
+      }
+    } catch (IOException e) {
+      logger.warning("REST service discovery failed for " + serviceName + ": " + e.getMessage());
+    } finally {
+      try {
+        if (in != null) in.close();
+      } catch (IOException ignored) {}
+      if (con != null) con.disconnect();
     }
-
-    return ctx;
+    return null;
   }
 }

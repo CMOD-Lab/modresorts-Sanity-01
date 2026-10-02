@@ -1,0 +1,29 @@
+# Weather Service – Kubernetes ConfigMap for Amazon EKS
+# cz-java-0082: Provides independently-deployable configuration for the
+# WeatherServlet microservice.  All environment-specific values are
+# externalised here so the same container image can be promoted across
+# environments without rebuilding.
+#
+# Usage:
+#   kubectl apply -f k8s/weather-service/configmap.yaml
+#
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: weather-service-config
+  namespace: modresorts
+  labels:
+    app: weather-service
+    component: modresorts
+    managed-by: eks
+data:
+  # Base URL for Kubernetes DNS-based service discovery.
+  # Override with the actual cluster-internal DNS name of your service registry.
+  SERVICE_DISCOVERY_URL: "http://service-registry.modresorts.svc.cluster.local:8080"
+
+  # URL of the independent Customer microservice.
+  # Resolved via Kubernetes Service DNS so no hard-coded IPs are needed.
+  CUSTOMER_SERVICE_URL: "http://customer-service.modresorts.svc.cluster.local:8080"
+
+  # Application port exposed by the container.
+  APP_PORT: "9080"

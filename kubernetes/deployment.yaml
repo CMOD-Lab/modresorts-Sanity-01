@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: modresorts
+  namespace: modresorts
+  labels:
+    app: modresorts
+    component: web
+    managed-by: eks
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: modresorts
+  template:
+    metadata:
+      labels:
+        app: modresorts
+        component: web
+    spec:
+      containers:
+        - name: modresorts
+          image: "{{IMAGE_URI}}"
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 9080
+              protocol: TCP
+          env:
+            # Redis / Amazon ElastiCache
+            - name: REDIS_HOST
+              value: "{{REDIS_HOST}}"
+            - name: REDIS_PORT
+              value: "{{REDIS_PORT}}"
+            # Weather API key (injected from a Kubernetes Secret in production)
+            - name: WEATHER_API_KEY
+              value: "{{WEATHER_API_KEY}}"
+            # Kubernetes DNS-based service discovery
+            - name: SERVICE_DISCOVERY_URL
+              value: "{{SERVICE_DISCOVERY_URL}}"
+            # Independent Customer microservice URL
+            - name: CUSTOMER_SERVICE_URL
+              value: "{{CUSTOMER_SERVICE_URL}}"
+            # JVM tuning
+            - name: JAVA_OPTS
+              value: "-Xmx512m -Xms256m -XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0 -Dfile.encoding=UTF-8 -Duser.timezone=UTC"
+            - name: TZ
+              value: "UTC"
+          # Liveness probe – restarts the pod if the application is unresponsive
+          livenessProbe:
+            httpGet:
+              path: /resorts/health
+              port: 9080
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            failureThreshold: 3
+            timeoutSeconds: 5
+          # Readiness probe – removes the pod from Service endpoints until ready
+          readinessProbe:
+            httpGet:
+              path: /resorts/health
+              port: 9080
+            initialDelaySeconds: 45
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "500m"
+              memory: "1Gi"
+      # Spread pods across availability zones for high availability
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: modresorts

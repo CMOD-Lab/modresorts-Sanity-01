@@ -1,0 +1,54 @@
+# Java build artifacts
+target/
+*.class
+
+# Git
+.git/
+.gitignore
+
+# Maven wrapper – NEVER copy into Docker image
+mvnw
+mvnw.cmd
+.mvn/
+
+# Gradle wrapper – NEVER copy into Docker image
+gradlew
+gradlew.bat
+gradle/wrapper/
+build.gradle.hideme
+
+# IDE / editor files
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+.classpath
+.project
+.settings/
+
+# OS artefacts
+.DS_Store
+Thumbs.db
+
+# Documentation
+*.md
+LICENSE
+CODEOWNERS
+CONTRIBUTING.md
+
+# Migration bundle (not needed in image)
+migration-bundle/
+
+# Existing k8s manifests (not needed in image)
+k8s/
+
+# Scripts (not needed in image)
+scripts/
+
+# Docs
+docs/
+
+# Docker files themselves
+docker-compose.yml
+.dockerignore

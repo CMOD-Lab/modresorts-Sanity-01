@@ -1,0 +1,37 @@
+# Weather Service – Kubernetes Service for Amazon EKS
+# cz-java-0082: Exposes the independently-deployable WeatherServlet microservice
+# within the cluster via a stable Kubernetes Service DNS name.
+#
+# Other microservices (e.g. the front-end) reach the weather service at:
+#   http://weather-service.modresorts.svc.cluster.local:8080/resorts/weather
+#
+# An AWS Load Balancer Controller annotation is included so that an
+# Application Load Balancer (ALB) can be provisioned for external access
+# when required.
+#
+# Usage:
+#   kubectl apply -f k8s/weather-service/service.yaml
+#
+apiVersion: v1
+kind: Service
+metadata:
+  name: weather-service
+  namespace: modresorts
+  labels:
+    app: weather-service
+    component: modresorts
+    managed-by: eks
+  annotations:
+    # Uncomment to expose via AWS ALB (requires AWS Load Balancer Controller)
+    # kubernetes.io/ingress.class: alb
+    # alb.ingress.kubernetes.io/scheme: internet-facing
+    # alb.ingress.kubernetes.io/target-type: ip
+spec:
+  type: ClusterIP
+  selector:
+    app: weather-service
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8080
+      targetPort: 9080
