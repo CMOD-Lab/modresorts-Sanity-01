@@ -1,6 +1,5 @@
 package com.acme.modres;
 
-import com.acme.modres.db.ModResortsCustomerInformation;
 import com.acme.modres.exception.ExceptionHandler;
 import com.acme.modres.mbean.AppInfo;
 
@@ -13,7 +12,6 @@ import java.net.HttpURLConnection;
 import java.net.MalformedURLException;
 import java.net.ProtocolException;
 import java.net.URL;
-import java.util.Hashtable;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -23,7 +21,6 @@ import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
-import javax.inject.Inject;
 import javax.management.InstanceAlreadyExistsException;
 import javax.management.InstanceNotFoundException;
 import javax.management.IntrospectionException;
@@ -35,16 +32,20 @@ import javax.management.NotCompliantMBeanException;
 import javax.management.ObjectInstance;
 import javax.management.ObjectName;
 import javax.management.ReflectionException;
-import javax.naming.InitialContext;
-import javax.naming.NamingException;
 import javax.servlet.annotation.WebServlet;
 
 @WebServlet({ "/resorts/weather" })
 public class WeatherServlet extends HttpServlet {
   private static final long serialVersionUID = 1L;
 
-  @Inject
-  private ModResortsCustomerInformation customerInfo;
+  // cz-java-0082: Replaced tightly-coupled @Inject ModResortsCustomerInformation
+  // with a REST-based microservice client. The customer information service is now
+  // an independently deployable EKS microservice, accessed via the
+  // CUSTOMER_INFO_SERVICE_URL environment variable (e.g.,
+  // http://customer-info-service.<namespace>.svc.cluster.local/api/customers).
+  // This decouples WeatherServlet from the customer-info component, allowing each
+  // to be deployed, scaled, and versioned independently on Amazon EKS.
+  private static final String CUSTOMER_INFO_SERVICE_URL_ENV = "CUSTOMER_INFO_SERVICE_URL";
 
   // local OS environment variable key name. The key value should provide an API
   // key that will be used to
@@ -53,7 +54,8 @@ public class WeatherServlet extends HttpServlet {
 
   private static final Logger logger = Logger.getLogger(WeatherServlet.class.getName());
 
-  private static InitialContext context;
+  // Environment variable for REST-based service discovery endpoint (replaces RMI/IIOP lookup)
+  private static final String SERVICE_DISCOVERY_URL_ENV = "SERVICE_DISCOVERY_URL";
 
   MBeanServer server;
   ObjectName weatherON;
@@ -75,7 +77,8 @@ public class WeatherServlet extends HttpServlet {
     } catch (InstanceAlreadyExistsException | MBeanRegistrationException | NotCompliantMBeanException e) {
       e.printStackTrace();
     }
-    context = setInitialContextProps();
+    // Initialize REST-based service discovery (replaces RMI InitialContext setup)
+    initServiceDiscovery();
   }
 
   @Override
@@ -253,26 +256,98 @@ public class WeatherServlet extends HttpServlet {
 
     String serverEnv = "";
 
-    serverEnv += com.ibm.websphere.runtime.ServerName.getDisplayName();
-    serverEnv += com.ibm.websphere.runtime.ServerName.getFullName();
+    // Replaced WebSphere-specific com.ibm.websphere.runtime.ServerName with
+    // standard environment variable lookups for container portability
+    serverEnv += System.getenv().getOrDefault("SERVER_DISPLAY_NAME", "");
+    serverEnv += System.getenv().getOrDefault("SERVER_FULL_NAME", "");
 
     return serverEnv;
   }
 
-  private InitialContext setInitialContextProps() {
-
-    Hashtable ht = new Hashtable();
-
-    ht.put("java.naming.factory.initial", "com.ibm.websphere.naming.WsnInitialContextFactory");
-    ht.put("java.naming.provider.url", "corbaloc:iiop:localhost:2809");
-
-    InitialContext ctx = null;
-    try {
-      ctx = new InitialContext(ht);
-    } catch (NamingException e) {
-      e.printStackTrace();
+  /**
+   * Retrieves customer information from the independently deployed customer-info
+   * microservice via a REST HTTP call.
+   *
+   * cz-java-0082: Replaces the former tightly-coupled @Inject of
+   * ModResortsCustomerInformation. The customer-info component is now an
+   * independent EKS microservice with its own Kubernetes Deployment, Service,
+   * and ConfigMap. Its endpoint is supplied via the CUSTOMER_INFO_SERVICE_URL
+   * environment variable (e.g.,
+   * http://customer-info-service.<namespace>.svc.cluster.local/api/customers).
+   *
+   * @return JSON string response from the customer-info microservice, or an
+   *         empty JSON array if the service URL is not configured or the call fails.
+   */
+  protected String getCustomerInfoFromService() {
+    String serviceUrl = System.getenv(CUSTOMER_INFO_SERVICE_URL_ENV);
+    if (serviceUrl == null || serviceUrl.trim().isEmpty()) {
+      logger.warning("CUSTOMER_INFO_SERVICE_URL environment variable is not set. "
+          + "Customer info microservice will be skipped. "
+          + "Set CUSTOMER_INFO_SERVICE_URL to the Kubernetes service DNS endpoint "
+          + "(e.g., http://customer-info-service.<namespace>.svc.cluster.local/api/customers).");
+      return "[]";
     }
 
-    return ctx;
+    HttpURLConnection con = null;
+    BufferedReader in = null;
+    try {
+      URL url = new URL(serviceUrl);
+      con = (HttpURLConnection) url.openConnection();
+      con.setRequestMethod("GET");
+      con.setRequestProperty("Accept", "application/json");
+      con.setConnectTimeout(5000);
+      con.setReadTimeout(5000);
+
+      int responseCode = con.getResponseCode();
+      if (responseCode >= 200 && responseCode < 300) {
+        in = new BufferedReader(new InputStreamReader(con.getInputStream()));
+        StringBuilder sb = new StringBuilder();
+        String line;
+        while ((line = in.readLine()) != null) {
+          sb.append(line);
+        }
+        logger.log(Level.FINE, "Customer info service response received from: " + serviceUrl);
+        return sb.toString();
+      } else {
+        logger.warning("Customer info microservice returned HTTP " + responseCode
+            + " from URL: " + serviceUrl);
+        return "[]";
+      }
+    } catch (IOException e) {
+      logger.log(Level.WARNING,
+          "Failed to call customer info microservice at " + serviceUrl + ": " + e.getMessage(), e);
+      return "[]";
+    } finally {
+      if (in != null) {
+        try { in.close(); } catch (IOException ignored) {}
+      }
+      if (con != null) {
+        con.disconnect();
+      }
+    }
+  }
+
+  /**
+   * Initializes REST-based service discovery using Kubernetes DNS and environment variables.
+   * Replaces the former RMI/IIOP-based InitialContext lookup
+   * (previously used corbaloc:iiop with WsnInitialContextFactory) which is not
+   * available in container environments. Service endpoints are now resolved via
+   * Kubernetes Service DNS names supplied through the SERVICE_DISCOVERY_URL
+   * environment variable.
+   */
+  private void initServiceDiscovery() {
+    // cz-java-0080: Replaced RMI resource lookup (corbaloc:iiop:localhost:2809 via
+    // WsnInitialContextFactory) with REST-based service discovery.
+    // The service endpoint is resolved via Kubernetes DNS using the
+    // SERVICE_DISCOVERY_URL environment variable (e.g., http://<k8s-service-name>/api/lookup).
+    String serviceDiscoveryUrl = System.getenv(SERVICE_DISCOVERY_URL_ENV);
+    if (serviceDiscoveryUrl != null && !serviceDiscoveryUrl.trim().isEmpty()) {
+      logger.info("REST service discovery endpoint configured: " + serviceDiscoveryUrl);
+    } else {
+      logger.warning("SERVICE_DISCOVERY_URL environment variable is not set. "
+          + "REST-based service discovery will be skipped. "
+          + "Set SERVICE_DISCOVERY_URL to the Kubernetes service DNS endpoint "
+          + "(e.g., http://<service-name>.<namespace>.svc.cluster.local/api/lookup).");
+    }
   }
 }

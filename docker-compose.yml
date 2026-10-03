@@ -1,0 +1,46 @@
+version: "3.8"
+
+services:
+  modresorts:
+    image: modresorts:latest
+    container_name: modresorts-app
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "9080:9080"
+    environment:
+      # Application runtime
+      TZ: "UTC"
+      JAVA_OPTS: "-Xmx512m -Xms256m -XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0"
+      # Weather API key (obtain from wunderground.com)
+      WEATHER_API_KEY: "${WEATHER_API_KEY:-}"
+      # Redis / Amazon ElastiCache connection (for customer information state)
+      REDIS_HOST: "${REDIS_HOST:-localhost}"
+      REDIS_PORT: "${REDIS_PORT:-6379}"
+      # Customer info microservice endpoint (EKS service DNS)
+      CUSTOMER_INFO_SERVICE_URL: "${CUSTOMER_INFO_SERVICE_URL:-}"
+      # REST-based service discovery endpoint (EKS service DNS)
+      SERVICE_DISCOVERY_URL: "${SERVICE_DISCOVERY_URL:-}"
+      # Server identity env vars (replaces WebSphere ServerName)
+      SERVER_DISPLAY_NAME: "${SERVER_DISPLAY_NAME:-modresorts-local}"
+      SERVER_FULL_NAME: "${SERVER_FULL_NAME:-modresorts-local}"
+    volumes:
+      - modresorts-logs:/opt/tomcat/logs
+    networks:
+      - app-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  modresorts-logs:
+    driver: local
+
+networks:
+  app-network:
+    driver: bridge
