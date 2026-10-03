@@ -252,8 +252,9 @@ public class WeatherServlet extends HttpServlet {
 
     String serverEnv = "";
 
-    serverEnv += com.ibm.websphere.runtime.ServerName.getDisplayName();
-    serverEnv += com.ibm.websphere.runtime.ServerName.getFullName();
+    // Replaced WebSphere-specific ServerName with standard Java system properties
+    serverEnv += System.getProperty("server.display.name", "");
+    serverEnv += System.getProperty("server.full.name", "");
 
     return serverEnv;
   }
