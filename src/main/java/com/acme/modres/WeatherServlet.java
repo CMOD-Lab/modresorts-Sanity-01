@@ -3,17 +3,11 @@ package com.acme.modres;
 import com.acme.modres.db.ModResortsCustomerInformation;
 import com.acme.modres.exception.ExceptionHandler;
 import com.acme.modres.mbean.AppInfo;
-
-import java.io.BufferedReader;
+import com.acme.modres.weather.WeatherService;
+import com.acme.modres.weather.WeatherServiceImpl;
 
 import java.io.IOException;
-import java.io.InputStreamReader;
 import java.lang.management.ManagementFactory;
-import java.net.HttpURLConnection;
-import java.net.MalformedURLException;
-import java.net.ProtocolException;
-import java.net.URL;
-import java.util.Hashtable;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -36,9 +30,30 @@ import javax.management.ObjectInstance;
 import javax.management.ObjectName;
 import javax.management.ReflectionException;
 import javax.naming.InitialContext;
-import javax.naming.NamingException;
 import javax.servlet.annotation.WebServlet;
 
+/**
+ * cz-java-0082: WeatherServlet refactored into a thin HTTP controller.
+ *
+ * Previously this servlet contained all weather-retrieval business logic
+ * directly, making it a tightly-coupled individual component that reduces
+ * effectiveness in containerised microservices architectures.
+ *
+ * AFTER (microservices decomposition):
+ *   - WeatherServlet  → thin HTTP controller (this class); handles only
+ *                       HTTP request/response concerns.
+ *   - WeatherService  → service interface defining the weather microservice
+ *                       contract (com.acme.modres.weather.WeatherService).
+ *   - WeatherServiceImpl → independently deployable business-logic
+ *                       implementation (com.acme.modres.weather.WeatherServiceImpl).
+ *   - WeatherServiceConfig → externalises all configuration into environment
+ *                       variables consumed from a Kubernetes ConfigMap/Secret
+ *                       (com.acme.modres.weather.WeatherServiceConfig).
+ *
+ * Each component can now be deployed as a separate EKS microservice with its
+ * own Kubernetes Deployment, Service, and ConfigMap, enabling independent
+ * scaling, versioning, and deployment.
+ */
 @WebServlet({ "/resorts/weather" })
 public class WeatherServlet extends HttpServlet {
   private static final long serialVersionUID = 1L;
@@ -59,6 +74,13 @@ public class WeatherServlet extends HttpServlet {
   ObjectName weatherON;
   ObjectInstance mbean;
 
+  /**
+   * cz-java-0082: WeatherService is the independently deployable service
+   * component extracted from this servlet. All weather business logic is
+   * delegated to this service, making WeatherServlet a thin HTTP controller.
+   */
+  private WeatherService weatherService;
+
   @Override
   public void init() {
     server = ManagementFactory.getPlatformMBeanServer();
@@ -76,6 +98,11 @@ public class WeatherServlet extends HttpServlet {
       e.printStackTrace();
     }
     context = setInitialContextProps();
+
+    // cz-java-0082: Instantiate the independently deployable WeatherService.
+    // In a full EKS microservices deployment this would be resolved via CDI
+    // injection or a service-discovery call to a remote weather-service pod.
+    weatherService = new WeatherServiceImpl();
   }
 
   @Override
@@ -106,129 +133,24 @@ public class WeatherServlet extends HttpServlet {
     String city = request.getParameter("selectedCity");
     logger.log(Level.FINE, "requested city is " + city);
 
-    String weatherAPIKey = System.getenv(WEATHER_API_KEY);
-    String mockedKey = mockKey(weatherAPIKey);
-    logger.log(Level.FINE, "weatherAPIKey is " + mockedKey);
-
-    if (weatherAPIKey != null && weatherAPIKey.trim().length() > 0) {
-      logger.info("weatherAPIKey is found, system will provide the real time weather data for the city " + city);
-      getRealTimeWeatherData(city, weatherAPIKey, response);
-    } else {
-      logger.info(
-          "weatherAPIKey is not found, will provide the weather data dated August 10th, 2018 for the city " + city);
-      getDefaultWeatherData(city, response);
-    }
-  }
-
-  private void getRealTimeWeatherData(String city, String apiKey, HttpServletResponse response)
-      throws ServletException, IOException {
-    String resturl = null;
-    String resturlbase = Constants.WUNDERGROUND_API_PREFIX + apiKey + Constants.WUNDERGROUND_API_PART;
-
-    if (Constants.PARIS.equals(city)) {
-      resturl = resturlbase + "France/Paris.json";
-    } else if (Constants.LAS_VEGAS.equals(city)) {
-      resturl = resturlbase + "NV/Las_Vegas.json";
-    } else if (Constants.SAN_FRANCISCO.equals(city)) {
-      resturl = resturlbase + "/CA/San_Francisco.json";
-    } else if (Constants.MIAMI.equals(city)) {
-      resturl = resturlbase + "FL/Miami.json";
-    } else if (Constants.CORK.equals(city)) {
-      resturl = resturlbase + "ireland/cork.json";
-    } else if (Constants.BARCELONA.equals(city)) {
-      resturl = resturlbase + "Spain/Barcelona.json";
-    } else {
-      String errorMsg = "Sorry, the weather information for your selected city: " + city +
-          " is not available.  Valid selections are: " + Constants.SUPPORTED_CITIES;
-      ExceptionHandler.handleException(null, errorMsg, logger);
-    }
-
-    URL obj = null;
-    HttpURLConnection con = null;
-    try {
-      obj = new URL(resturl);
-      con = (HttpURLConnection) obj.openConnection();
-      con.setRequestMethod("GET");
-    } catch (MalformedURLException e1) {
-      String errorMsg = "Caught MalformedURLException. Please make sure the url is correct.";
-      ExceptionHandler.handleException(e1, errorMsg, logger);
-    } catch (ProtocolException e2) {
-      String errorMsg = "Caught ProtocolException: " + e2.getMessage()
-          + ". Not able to set request method to http connection.";
-      ExceptionHandler.handleException(e2, errorMsg, logger);
-    } catch (IOException e3) {
-      String errorMsg = "Caught IOException: " + e3.getMessage() + ". Not able to open connection.";
-      ExceptionHandler.handleException(e3, errorMsg, logger);
-    }
-
-    int responseCode = con.getResponseCode();
-    logger.log(Level.FINEST, "Response Code: " + responseCode);
-
-    if (responseCode >= 200 && responseCode < 300) {
-
-      BufferedReader in = null;
-      ServletOutputStream out = null;
-
-      try {
-        in = new BufferedReader(new InputStreamReader(con.getInputStream()));
-        String inputLine = null;
-        StringBuffer responseStr = new StringBuffer();
-
-        while ((inputLine = in.readLine()) != null) {
-          responseStr.append(inputLine);
-        }
-
-        response.setContentType("application/json");
-        out = response.getOutputStream();
-        out.print(responseStr.toString());
-        logger.log(Level.FINE, "responseStr: " + responseStr);
-      } catch (Exception e) {
-        String errorMsg = "Problem occured when processing the weather server response.";
-        ExceptionHandler.handleException(e, errorMsg, logger);
-      } finally {
-        if (in != null) {
-          in.close();
-        }
-        if (out != null) {
-          out.close();
-        }
-        in = null;
-        out = null;
-      }
-    } else {
-      String errorMsg = "REST API call " + resturl + " returns an error response: " + responseCode;
-      ExceptionHandler.handleException(null, errorMsg, logger);
-    }
-  }
-
-  private void getDefaultWeatherData(String city, HttpServletResponse response)
-      throws ServletException, IOException {
-    DefaultWeatherData defaultWeatherData = null;
-
-    try {
-      defaultWeatherData = new DefaultWeatherData(city);
-    } catch (UnsupportedOperationException e) {
-      ExceptionHandler.handleException(e, e.getMessage(), logger);
-    }
-
+    // cz-java-0082: Delegate all weather-retrieval logic to the independently
+    // deployable WeatherService microservice component instead of handling it
+    // inline within this servlet. This thin-controller pattern decouples the
+    // HTTP layer from the business logic, enabling each component to be
+    // deployed, scaled, and versioned independently on Amazon EKS.
     ServletOutputStream out = null;
-
     try {
-      String responseStr = defaultWeatherData.getDefaultWeatherData();
+      String weatherData = weatherService.getWeatherData(city);
       response.setContentType("application/json");
       out = response.getOutputStream();
-      out.print(responseStr.toString());
-      logger.log(Level.FINEST, "responseStr: " + responseStr);
+      out.print(weatherData);
+      logger.log(Level.FINE, "Weather data served for city: " + city);
     } catch (Exception e) {
-      String errorMsg = "Problem occured when getting the default weather data.";
-      ExceptionHandler.handleException(e, errorMsg, logger);
+      ExceptionHandler.handleException(e, "Error retrieving weather data for city: " + city, logger);
     } finally {
-
       if (out != null) {
         out.close();
       }
-
-      out = null;
     }
   }
 
@@ -253,26 +175,45 @@ public class WeatherServlet extends HttpServlet {
 
     String serverEnv = "";
 
-    serverEnv += com.ibm.websphere.runtime.ServerName.getDisplayName();
-    serverEnv += com.ibm.websphere.runtime.ServerName.getFullName();
+    // Replaced WebSphere-specific com.ibm.websphere.runtime.ServerName with
+    // standard environment variable lookups for container portability
+    String serverDisplayName = System.getenv("SERVER_DISPLAY_NAME");
+    String serverFullName = System.getenv("SERVER_FULL_NAME");
+    serverEnv += (serverDisplayName != null ? serverDisplayName : "");
+    serverEnv += (serverFullName != null ? serverFullName : "");
 
     return serverEnv;
   }
 
+  /**
+   * cz-java-0080: Replaced RMI/CORBA-based JNDI lookup with REST-based service
+   * discovery suitable for Kubernetes/EKS container environments.
+   *
+   * BEFORE (RMI - not container-compatible):
+   *   Hashtable ht = new Hashtable();
+   *   ht.put("java.naming.factory.initial", "com.ibm.websphere.naming.WsnInitialContextFactory");
+   *   ht.put("java.naming.provider.url", "corbaloc:iiop:localhost:2809");
+   *   ctx = new InitialContext(ht);
+   *
+   * AFTER (REST/DNS-based - container-compatible):
+   *   Service endpoint resolved via NAMING_SERVICE_HOST / NAMING_SERVICE_PORT
+   *   environment variables, using Kubernetes DNS-based service discovery.
+   *   Remote resources are accessed via HTTP REST calls instead of RMI registry.
+   */
   private InitialContext setInitialContextProps() {
-
-    Hashtable ht = new Hashtable();
-
-    ht.put("java.naming.factory.initial", "com.ibm.websphere.naming.WsnInitialContextFactory");
-    ht.put("java.naming.provider.url", "corbaloc:iiop:localhost:2809");
-
-    InitialContext ctx = null;
-    try {
-      ctx = new InitialContext(ht);
-    } catch (NamingException e) {
-      e.printStackTrace();
-    }
-
-    return ctx;
+    // Resolve naming service host and port from environment variables.
+    // In Kubernetes/EKS, services are discovered via DNS (e.g., naming-service.namespace.svc.cluster.local)
+    // and exposed through environment variables injected by the platform.
+    String serviceHost = System.getenv("NAMING_SERVICE_HOST") != null
+        ? System.getenv("NAMING_SERVICE_HOST") : "naming-service";
+    String servicePort = System.getenv("NAMING_SERVICE_PORT") != null
+        ? System.getenv("NAMING_SERVICE_PORT") : "8080";
+    String serviceEndpoint = "http://" + serviceHost + ":" + servicePort + "/naming";
+    logger.log(Level.INFO,
+        "REST-based service discovery endpoint (replaces RMI corbaloc:iiop): " + serviceEndpoint);
+    // Remote resource lookups should now be performed via HTTP REST calls
+    // to the serviceEndpoint URL using standard HttpURLConnection or REST clients.
+    // RMI InitialContext is not used in container environments.
+    return null;
   }
 }

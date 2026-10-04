@@ -1,0 +1,39 @@
+version: "3.8"
+
+services:
+  modresorts:
+    image: modresorts:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: modresorts-app
+    ports:
+      - "9080:9080"
+    environment:
+      # Weather service configuration
+      - WEATHER_API_KEY=${WEATHER_API_KEY:-}
+      - WEATHER_SERVICE_BASE_URL=${WEATHER_SERVICE_BASE_URL:-http://api.wunderground.com/api/}
+      # Redis / ElastiCache configuration
+      - REDIS_HOST=${REDIS_HOST:-localhost}
+      - REDIS_PORT=${REDIS_PORT:-6379}
+      # Naming service (REST-based service discovery)
+      - NAMING_SERVICE_HOST=${NAMING_SERVICE_HOST:-naming-service}
+      - NAMING_SERVICE_PORT=${NAMING_SERVICE_PORT:-8080}
+      # Server identity
+      - SERVER_DISPLAY_NAME=${SERVER_DISPLAY_NAME:-modresorts}
+      - SERVER_FULL_NAME=${SERVER_FULL_NAME:-modresorts-server}
+      # JVM options
+      - JAVA_OPTS=-Xmx512m -Xms256m -XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0 -Dfile.encoding=UTF-8 -Duser.timezone=UTC
+    networks:
+      - app-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9080/resorts/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+networks:
+  app-network:
+    driver: bridge
