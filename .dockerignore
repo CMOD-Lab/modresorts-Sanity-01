@@ -1,0 +1,58 @@
+# Java / Maven project – Docker ignore file
+# Excludes build artefacts, IDE files, and wrapper scripts that must NOT be
+# copied into the Docker build context.
+
+# Maven build output
+target/
+
+# Maven wrapper (NEVER copy into image – use system mvn)
+mvnw
+mvnw.cmd
+.mvn/
+
+# Gradle wrapper (not used, but exclude for safety)
+gradlew
+gradlew.bat
+gradle/wrapper/
+
+# Version control
+.git/
+.gitignore
+.gitattributes
+
+# IDE / editor files
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+.classpath
+.project
+.settings/
+
+# OS artefacts
+.DS_Store
+Thumbs.db
+
+# Documentation
+*.md
+LICENSE
+CONTRIBUTING.md
+CODEOWNERS
+
+# Migration bundle (not needed in container)
+migration-bundle/
+
+# Docker files (avoid recursive copy)
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Scripts directory
+scripts/
+
+# Kubernetes manifests
+kubernetes/
+
+# Docs
+docs/

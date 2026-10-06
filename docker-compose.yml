@@ -1,0 +1,33 @@
+# ModResorts – Docker Compose (application only)
+# External services (Redis, DB) are provided separately via environment variables.
+
+version: "3.9"
+
+services:
+  modresorts:
+    image: modresorts:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: modresorts-app
+    ports:
+      - "8080:8080"
+    environment:
+      # JVM settings
+      JAVA_OPTS: "-Xms256m -Xmx512m -XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0"
+      TZ: "UTC"
+      # Redis / ElastiCache connection (override at runtime)
+      REDIS_HOST: "${REDIS_HOST:-localhost}"
+      REDIS_PORT: "${REDIS_PORT:-6379}"
+      # Weather microservice connection (override at runtime)
+      WEATHER_SERVICE_HOST: "${WEATHER_SERVICE_HOST:-weather-service}"
+      WEATHER_SERVICE_PORT: "${WEATHER_SERVICE_PORT:-8080}"
+      WEATHER_SERVICE_BASE_PATH: "${WEATHER_SERVICE_BASE_PATH:-/api/weather}"
+      WEATHER_API_KEY: "${WEATHER_API_KEY:-}"
+    networks:
+      - app-network
+    restart: unless-stopped
+
+networks:
+  app-network:
+    driver: bridge

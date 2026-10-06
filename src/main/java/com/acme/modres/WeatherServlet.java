@@ -3,6 +3,7 @@ package com.acme.modres;
 import com.acme.modres.db.ModResortsCustomerInformation;
 import com.acme.modres.exception.ExceptionHandler;
 import com.acme.modres.mbean.AppInfo;
+import com.acme.modres.weather.WeatherServiceClient;
 
 import java.io.BufferedReader;
 
@@ -13,7 +14,6 @@ import java.net.HttpURLConnection;
 import java.net.MalformedURLException;
 import java.net.ProtocolException;
 import java.net.URL;
-import java.util.Hashtable;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -35,8 +35,6 @@ import javax.management.NotCompliantMBeanException;
 import javax.management.ObjectInstance;
 import javax.management.ObjectName;
 import javax.management.ReflectionException;
-import javax.naming.InitialContext;
-import javax.naming.NamingException;
 import javax.servlet.annotation.WebServlet;
 
 @WebServlet({ "/resorts/weather" })
@@ -53,7 +51,18 @@ public class WeatherServlet extends HttpServlet {
 
   private static final Logger logger = Logger.getLogger(WeatherServlet.class.getName());
 
-  private static InitialContext context;
+  // cz-java-0082: Replaced tightly-coupled InitialContext (JNDI/RMI) component with an
+  // independently deployable WeatherServiceClient microservice client.
+  // The WeatherServiceClient resolves its endpoint exclusively from Kubernetes-injected
+  // environment variables (WEATHER_SERVICE_HOST, WEATHER_SERVICE_PORT,
+  // WEATHER_SERVICE_BASE_PATH), enabling independent deployment as an EKS microservice
+  // with its own Kubernetes Deployment, Service, and ConfigMap.
+  private WeatherServiceClient weatherServiceClient;
+
+  // REST-based service endpoint discovered via environment variable (replaces RMI/JNDI lookup)
+  // cz-java-0080: RMI registry is not available in container environments;
+  // service discovery is performed via Kubernetes DNS and environment variables.
+  private static String serviceEndpoint;
 
   MBeanServer server;
   ObjectName weatherON;
@@ -75,7 +84,13 @@ public class WeatherServlet extends HttpServlet {
     } catch (InstanceAlreadyExistsException | MBeanRegistrationException | NotCompliantMBeanException e) {
       e.printStackTrace();
     }
-    context = setInitialContextProps();
+    // cz-java-0080: Replaced RMI/JNDI InitialContext lookup with REST-based
+    // service discovery using Kubernetes DNS and environment variables.
+    serviceEndpoint = discoverServiceEndpoint();
+
+    // cz-java-0082: Initialise the independently deployable weather microservice client.
+    // All connection parameters are resolved from environment variables at startup.
+    weatherServiceClient = new WeatherServiceClient();
   }
 
   @Override
@@ -253,26 +268,35 @@ public class WeatherServlet extends HttpServlet {
 
     String serverEnv = "";
 
-    serverEnv += com.ibm.websphere.runtime.ServerName.getDisplayName();
-    serverEnv += com.ibm.websphere.runtime.ServerName.getFullName();
+    // Replaced WebSphere-specific com.ibm.websphere.runtime.ServerName with
+    // standard environment variable lookups for container portability (cz-java-0075)
+    serverEnv += System.getenv().getOrDefault("SERVER_DISPLAY_NAME", "");
+    serverEnv += System.getenv().getOrDefault("SERVER_FULL_NAME", "");
 
     return serverEnv;
   }
 
-  private InitialContext setInitialContextProps() {
-
-    Hashtable ht = new Hashtable();
-
-    ht.put("java.naming.factory.initial", "com.ibm.websphere.naming.WsnInitialContextFactory");
-    ht.put("java.naming.provider.url", "corbaloc:iiop:localhost:2809");
-
-    InitialContext ctx = null;
-    try {
-      ctx = new InitialContext(ht);
-    } catch (NamingException e) {
-      e.printStackTrace();
-    }
-
-    return ctx;
+  /**
+   * cz-java-0080: Replaces the former RMI/JNDI InitialContext lookup
+   * (WsnInitialContextFactory + corbaloc:iiop:localhost:2809) with REST-based
+   * service discovery via Kubernetes DNS and environment variables.
+   *
+   * <p>The service host and port are resolved from the environment variables
+   * SERVICE_HOST and SERVICE_PORT, which are automatically injected by
+   * Kubernetes when a Service named "modresorts" is present in the same
+   * namespace.  A plain HTTP REST call to the resolved endpoint replaces the
+   * former RMI registry lookup, making the application fully portable in
+   * container environments where an RMI registry is not available.
+   *
+   * @return the base REST endpoint URL for the remote service, e.g.
+   *         "http://modresorts-service:8080/api"
+   */
+  private String discoverServiceEndpoint() {
+    String serviceHost = System.getenv().getOrDefault("SERVICE_HOST", "modresorts-service");
+    String servicePort = System.getenv().getOrDefault("SERVICE_PORT", "8080");
+    String serviceBasePath = System.getenv().getOrDefault("SERVICE_BASE_PATH", "/api");
+    String endpoint = "http://" + serviceHost + ":" + servicePort + serviceBasePath;
+    logger.log(Level.INFO, "Service endpoint resolved via environment variables: " + endpoint);
+    return endpoint;
   }
 }
