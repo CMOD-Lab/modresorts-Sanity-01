@@ -3,6 +3,9 @@ package com.acme.modres;
 import com.acme.modres.db.ModResortsCustomerInformation;
 import com.acme.modres.exception.ExceptionHandler;
 import com.acme.modres.mbean.AppInfo;
+import com.azure.identity.DefaultAzureCredentialBuilder;
+import com.azure.security.keyvault.secrets.SecretClient;
+import com.azure.security.keyvault.secrets.SecretClientBuilder;
 
 import java.io.BufferedReader;
 
@@ -50,10 +53,13 @@ public class WeatherServlet extends HttpServlet {
   // key that will be used to
   // get weather information from site: http://www.wunderground.com
   private static final String WEATHER_API_KEY = "WEATHER_API_KEY";
+  private static final String WEATHER_API_SECRET_NAME = "WEATHER_API_SECRET_NAME";
+  private static final String AZURE_KEY_VAULT_URL = "AZURE_KEY_VAULT_URL";
 
   private static final Logger logger = Logger.getLogger(WeatherServlet.class.getName());
 
   private static InitialContext context;
+  private transient SecretClient secretClient;
 
   MBeanServer server;
   ObjectName weatherON;
@@ -62,6 +68,7 @@ public class WeatherServlet extends HttpServlet {
   @Override
   public void init() {
     server = ManagementFactory.getPlatformMBeanServer();
+    secretClient = buildSecretClient();
     try {
       weatherON = new ObjectName("com.acme.modres.mbean:name=appInfo");
     } catch (MalformedObjectNameException e) {
@@ -106,7 +113,7 @@ public class WeatherServlet extends HttpServlet {
     String city = request.getParameter("selectedCity");
     logger.log(Level.FINE, "requested city is " + city);
 
-    String weatherAPIKey = System.getenv(WEATHER_API_KEY);
+    String weatherAPIKey = resolveWeatherApiKey();
     String mockedKey = mockKey(weatherAPIKey);
     logger.log(Level.FINE, "weatherAPIKey is " + mockedKey);
 
@@ -247,6 +254,47 @@ public class WeatherServlet extends HttpServlet {
     }
     String lastToKeep = toBeMocked.substring(toBeMocked.length() - 3);
     return "*********" + lastToKeep;
+  }
+
+  private String resolveWeatherApiKey() {
+    String keyVaultUrl = System.getenv(AZURE_KEY_VAULT_URL);
+    String secretName = System.getenv(WEATHER_API_SECRET_NAME);
+
+    if (secretClient != null && isConfigured(keyVaultUrl) && isConfigured(secretName)) {
+      try {
+        return secretClient.getSecret(secretName).getValue();
+      } catch (RuntimeException ex) {
+        logger.log(Level.WARNING,
+            "Unable to retrieve weather API key from Azure Key Vault using Managed Identity. Falling back to environment variable.",
+            ex);
+      }
+    }
+
+    return System.getenv(WEATHER_API_KEY);
+  }
+
+  private SecretClient buildSecretClient() {
+    String keyVaultUrl = System.getenv(AZURE_KEY_VAULT_URL);
+    if (!isConfigured(keyVaultUrl)) {
+      logger.info("AZURE_KEY_VAULT_URL is not configured. Weather API key will be resolved from environment variables.");
+      return null;
+    }
+
+    try {
+      return new SecretClientBuilder()
+          .vaultUrl(keyVaultUrl)
+          .credential(new DefaultAzureCredentialBuilder().build())
+          .buildClient();
+    } catch (RuntimeException ex) {
+      logger.log(Level.WARNING,
+          "Unable to initialize Azure Key Vault SecretClient with Managed Identity. Weather API key will be resolved from environment variables.",
+          ex);
+      return null;
+    }
+  }
+
+  private boolean isConfigured(String value) {
+    return value != null && value.trim().length() > 0;
   }
 
   private String configureEnvDiscovery() {
